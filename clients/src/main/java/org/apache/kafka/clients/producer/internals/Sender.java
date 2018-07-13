@@ -172,13 +172,16 @@ public class Sender implements Runnable {
     void run(long now) {
         Cluster cluster = metadata.fetch();
         // get the list of partitions with data ready to send
+        // 获取那些已经可以发送的 RecordBatch 对应的 nodes (leader节点)
         RecordAccumulator.ReadyCheckResult result = this.accumulator.ready(cluster, now);
 
         // if there are any partitions whose leaders are not known yet, force metadata update
+        // 如果有 topic-partition 没有 leader ,就强制 metadata 更新
         if (result.unknownLeadersExist)
             this.metadata.requestUpdate();
 
         // remove any nodes we aren't ready to send to
+        // 如果与 node 没有连接（如果可以连接,会初始化该连接）,暂时先移除该 node
         Iterator<Node> iter = result.readyNodes.iterator();
         long notReadyTimeout = Long.MAX_VALUE;
         while (iter.hasNext()) {
@@ -190,10 +193,13 @@ public class Sender implements Runnable {
         }
 
         // create produce requests
+        // 返回该 node 对应的所有可以发送的 RecordBatch 组成的 batches（key 是 node.id）,并将 RecordBatch 从对应的 queue 中移除
         Map<Integer, List<RecordBatch>> batches = this.accumulator.drain(cluster,
                                                                          result.readyNodes,
                                                                          this.maxRequestSize,
                                                                          now);
+        // 保证一个 tp 只有一个 RecordBatch 在发送,保证有序性
+        // max.in.flight.requests.per.connection 设置为1时会保证
         if (guaranteeMessageOrder) {
             // Mute all the partitions drained
             for (List<RecordBatch> batchList : batches.values()) {
@@ -202,6 +208,7 @@ public class Sender implements Runnable {
             }
         }
 
+        // 将由于元数据不可用而导致发送超时的 RecordBatch 移除
         List<RecordBatch> expiredBatches = this.accumulator.abortExpiredBatches(this.requestTimeout, now);
         // update sensors
         for (RecordBatch expiredBatch : expiredBatches)
@@ -226,7 +233,7 @@ public class Sender implements Runnable {
         // otherwise if some partition already has some data accumulated but not ready yet,
         // the select time will be the time difference between now and its linger expiry time;
         // otherwise the select time will be the time difference between now and the metadata expiry time;
-        this.client.poll(pollTimeout, now);
+        this.client.poll(pollTimeout, now); // 关于 socket 的一些实际的读写操作（其中包括 meta 信息的更新）
     }
 
     /**

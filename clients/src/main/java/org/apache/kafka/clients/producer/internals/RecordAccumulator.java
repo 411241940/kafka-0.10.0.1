@@ -68,9 +68,10 @@ public final class RecordAccumulator {
     private final long retryBackoffMs;
     private final BufferPool free;
     private final Time time;
-    private final ConcurrentMap<TopicPartition, Deque<RecordBatch>> batches;
+    private final ConcurrentMap<TopicPartition, Deque<RecordBatch>> batches; // 每个 topic-partition 都有一个对应的 deque，其中存储的 RecordBatch 是发送的基本单位
     private final IncompleteRecordBatches incomplete;
     // The following variables are only accessed by the sender thread, so we don't need to protect them.
+    // 用来记录这个 tp 是否有还有 RecordBatch 未发送完，muted中存在时，其对应 deque 中其他 RecordBatch 即使达到条件也不会被发送，保证 tp 在任何时刻只有一个 RecordBatch 在发送
     private final Set<TopicPartition> muted;
     private int drainIndex;
 
@@ -166,16 +167,17 @@ public final class RecordAccumulator {
         appendsInProgress.incrementAndGet();
         try {
             // check if we have an in-progress batch
+            // ConcurrentMap<TopicPartition, Deque<RecordBatch>> batches，每个 TopicPartition 都会对应一个 Deque<RecordBatch>
             Deque<RecordBatch> dq = getOrCreateDeque(tp);
-            synchronized (dq) {
+            synchronized (dq) { // 对同一个 queue 进行操作时，保证线程安全
                 if (closed)
                     throw new IllegalStateException("Cannot send after the producer is closed.");
                 RecordAppendResult appendResult = tryAppend(timestamp, key, value, callback, dq);
-                if (appendResult != null)
+                if (appendResult != null) // topic-partition 已经有记录
                     return appendResult;
             }
 
-            // we don't have an in-progress record batch try to allocate a new batch
+            // 为 topic-partition 创建一个新的 RecordBatch, 需要初始化相应的 RecordBatch，要为其分配的大小是: max（batch.size, 加上头文件的本条消息的大小）
             int size = Math.max(this.batchSize, Records.LOG_OVERHEAD + Record.recordSize(key, value));
             log.trace("Allocating a new {} byte message buffer for topic {} partition {}", size, tp.topic(), tp.partition());
             ByteBuffer buffer = free.allocate(size, maxTimeToBlock);
@@ -190,12 +192,15 @@ public final class RecordAccumulator {
                     free.deallocate(buffer);
                     return appendResult;
                 }
+                // 给 topic-partition 创建一个 RecordBatch
                 MemoryRecords records = MemoryRecords.emptyRecords(buffer, compression, this.batchSize);
                 RecordBatch batch = new RecordBatch(tp, records, time.milliseconds());
+                // 向新的 RecordBatch 中追加数据
                 FutureRecordMetadata future = Utils.notNull(batch.tryAppend(timestamp, key, value, callback, time.milliseconds()));
 
-                dq.addLast(batch);
+                dq.addLast(batch); // 将 RecordBatch 添加到对应的 queue 中
                 incomplete.add(batch);
+                // 如果 dp.size()>1 就证明这个 queue 有一个 batch 是可以发送了
                 return new RecordAppendResult(future, dq.size() > 1 || batch.records.isFull(), true);
             }
         } finally {
@@ -296,6 +301,10 @@ public final class RecordAccumulator {
      * </ul>
      * </ol>
      */
+    /**
+     * 遍历所有的 tp（topic-partition），如果其对应的 RecordBatch 可以发送（大小达到 batch.size 大小或时间达到 linger.ms），就将该 tp 对应的 leader 选出来，
+     * 最后会返回一个可以发送 Produce request 的 Set<Node>（实际返回的是 ReadyCheckResult 实例，不过 Set<Node> 是最主要的成员变量
+     */
     public ReadyCheckResult ready(Cluster cluster, long nowMs) {
         Set<Node> readyNodes = new HashSet<>();
         long nextReadyCheckDelayMs = Long.MAX_VALUE;
@@ -309,7 +318,7 @@ public final class RecordAccumulator {
             Node leader = cluster.leaderFor(part);
             if (leader == null) {
                 unknownLeadersExist = true;
-            } else if (!readyNodes.contains(leader) && !muted.contains(part)) {
+            } else if (!readyNodes.contains(leader) && !muted.contains(part)) { // 如果 mute 过 ，将不会处理
                 synchronized (deque) {
                     RecordBatch batch = deque.peekFirst();
                     if (batch != null) {
@@ -317,11 +326,11 @@ public final class RecordAccumulator {
                         long waitedTimeMs = nowMs - batch.lastAttemptMs;
                         long timeToWaitMs = backingOff ? retryBackoffMs : lingerMs;
                         long timeLeftMs = Math.max(timeToWaitMs - waitedTimeMs, 0);
-                        boolean full = deque.size() > 1 || batch.records.isFull();
-                        boolean expired = waitedTimeMs >= timeToWaitMs;
+                        boolean full = deque.size() > 1 || batch.records.isFull(); // batch 满了
+                        boolean expired = waitedTimeMs >= timeToWaitMs; // batch 超时
                         boolean sendable = full || expired || exhausted || closed || flushInProgress();
-                        if (sendable && !backingOff) {
-                            readyNodes.add(leader);
+                        if (sendable && !backingOff) { // 可以发送
+                            readyNodes.add(leader); // 将可以发送的 leader 添加到集合中
                         } else {
                             // Note that this results in a conservative estimate since an un-sendable partition may have
                             // a leader that will later be found to have sendable data. However, this is good enough
@@ -360,6 +369,11 @@ public final class RecordAccumulator {
      * @param now The current unix time in milliseconds
      * @return A list of {@link RecordBatch} for each node specified with total size less than the requested maxSize.
      */
+    /**
+     * 返回该 node 对应的可以发送的 RecordBatch 的 batches,并从 queue 中移除（最大的大小为maxSize,超过的话,下次再发送）
+     * 遍历可发送请求的 node，然后再遍历在这个 node 上所有 tp，如果 tp 对应的 deque 有数据，将会被选择出来直到超过一个请求的最大长度（max.request.size）
+     * 即使 RecordBatch 没有达到条件，但为了保证每个 request 尽快多地发送数据提高发送效率，这个 RecordBatch 依然会被提前选出来并进行发送。
+     */
     public Map<Integer, List<RecordBatch>> drain(Cluster cluster,
                                                  Set<Node> nodes,
                                                  int maxSize,
@@ -378,7 +392,7 @@ public final class RecordAccumulator {
                 PartitionInfo part = parts.get(drainIndex);
                 TopicPartition tp = new TopicPartition(part.topic(), part.partition());
                 // Only proceed if the partition has no in-flight batches.
-                if (!muted.contains(tp)) {
+                if (!muted.contains(tp)) { // 被 mute 的 tp 依然不会被处理
                     Deque<RecordBatch> deque = getDeque(new TopicPartition(part.topic(), part.partition()));
                     if (deque != null) {
                         synchronized (deque) {
@@ -517,6 +531,7 @@ public final class RecordAccumulator {
         muted.add(tp);
     }
 
+    // tp 对应的 RecordBatch 发送完成，从 muted 集合中移除该 tp
     public void unmutePartition(TopicPartition tp) {
         muted.remove(tp);
     }

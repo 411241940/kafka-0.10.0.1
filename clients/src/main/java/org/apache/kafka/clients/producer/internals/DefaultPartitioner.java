@@ -69,6 +69,8 @@ public class DefaultPartitioner implements Partitioner {
         List<PartitionInfo> partitions = cluster.partitionsForTopic(topic);
         int numPartitions = partitions.size();
         if (keyBytes == null) {
+            // 如果key为null，则按照轮询的方式计算分区
+            // 第一次调用时随机生成一个整数（后面每次调用在这个整数上自增），将这个值与 topic 可用的 partition 总数取余得到 partition 值
             int nextValue = counter.getAndIncrement();
             List<PartitionInfo> availablePartitions = cluster.availablePartitionsForTopic(topic);
             if (availablePartitions.size() > 0) {
@@ -79,7 +81,8 @@ public class DefaultPartitioner implements Partitioner {
                 return DefaultPartitioner.toPositive(nextValue) % numPartitions;
             }
         } else {
-            // hash the keyBytes to choose a partition
+            // 如果key不为null，则将 key 的 hash 值与 topic 的 partition 数进行取余得到 partition 值
+            // murmur的Hash算法（非加密型Hash函数，具备高运算性能及低碰撞率）
             return DefaultPartitioner.toPositive(Utils.murmur2(keyBytes)) % numPartitions;
         }
     }

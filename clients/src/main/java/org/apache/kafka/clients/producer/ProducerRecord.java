@@ -38,11 +38,11 @@ package org.apache.kafka.clients.producer;
  */
 public final class ProducerRecord<K, V> {
 
-    private final String topic;
-    private final Integer partition;
-    private final K key;
-    private final V value;
-    private final Long timestamp;
+    private final String topic; // 所要发送的topic
+    private final Integer partition; // 指定的partition序号
+    private final K key; // 消息的key
+    private final V value; // 消息的value,即消息体
+    private final Long timestamp; // 消息的时间戳，可以分为 Create_Time 和 LogAppend_Time
 
     /**
      * Creates a record with a specified timestamp to be sent to a specified topic and partition

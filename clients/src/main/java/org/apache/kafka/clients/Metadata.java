@@ -33,20 +33,23 @@ import org.slf4j.LoggerFactory;
  * Metadata is maintained for only a subset of topics, which can be added to over time. When we request metadata for a
  * topic we don't have any metadata for it will trigger a metadata update.
  */
+// 这个类被 client 线程和后台 sender 所共享,它只保存了所有 topic 的部分数据,当我们请求一个它上面没有的 topic meta 时,它会通过发送 metadata update 来更新 meta 信息,
+// 如果 topic meta 过期策略是允许的,那么任何 topic 过期的话都会被从集合中移除,
+// 但是 consumer 是不允许 topic 过期的因为它明确地知道它需要管理哪些 topic
 public final class Metadata {
 
     private static final Logger log = LoggerFactory.getLogger(Metadata.class);
 
-    private final long refreshBackoffMs;
-    private final long metadataExpireMs;
-    private int version;
-    private long lastRefreshMs;
-    private long lastSuccessfulRefreshMs;
-    private Cluster cluster;
-    private boolean needUpdate;
+    private final long refreshBackoffMs; // metadata 更新失败时,为避免频繁更新 meta,最小的间隔时间,默认 100ms
+    private final long metadataExpireMs; // metadata 的过期时间, 默认 60,000ms
+    private int version; // 每更新成功1次，version自增1,主要是用于判断 metadata 是否更新
+    private long lastRefreshMs; // 最近一次更新时的时间（包含更新失败的情况）
+    private long lastSuccessfulRefreshMs; // 最近一次成功更新的时间（如果每次都成功的话，与前面的值相等, 否则，lastSuccessulRefreshMs < lastRefreshMs)
+    private Cluster cluster; // 集群中一些 topic 的信息
+    private boolean needUpdate; // 是都需要更新 metadata
     private final Set<String> topics;
-    private final List<Listener> listeners;
-    private boolean needMetadataForAllTopics;
+    private final List<Listener> listeners; // 事件监控者
+    private boolean needMetadataForAllTopics; // 是否强制更新所有的 metadata
 
     /**
      * Create a metadata instance with reasonable defaults
