@@ -299,7 +299,7 @@ public abstract class AbstractCoordinator implements Closeable {
                         long now = time.milliseconds();
                         heartbeat.receiveHeartbeat(now);
                         long nextHeartbeatTime = now + heartbeat.timeToNextHeartbeat(now);
-                        client.schedule(HeartbeatTask.this, nextHeartbeatTime);
+                        client.schedule(HeartbeatTask.this, nextHeartbeatTime); // 放入delayedQueue
                     }
 
                     @Override

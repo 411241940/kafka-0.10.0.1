@@ -29,7 +29,7 @@ private[timer] class TimerTaskList(taskCounter: AtomicInteger) extends Delayed {
   // TimerTaskList forms a doubly linked cyclic list using a dummy root entry
   // root.next points to the head
   // root.prev points to the tail
-  private[this] val root = new TimerTaskEntry(null, -1)
+  private[this] val root = new TimerTaskEntry(null, -1) // 链表的头节点
   root.next = root
   root.prev = root
 
@@ -88,6 +88,7 @@ private[timer] class TimerTaskList(taskCounter: AtomicInteger) extends Delayed {
   }
 
   // Remove the specified timer task entry from this list
+  // 从双向链表中删除元素
   def remove(timerTaskEntry: TimerTaskEntry): Unit = {
     synchronized {
       timerTaskEntry.synchronized {
@@ -135,8 +136,8 @@ private[timer] class TimerTaskEntry(val timerTask: TimerTask, val expirationMs: 
 
   @volatile
   var list: TimerTaskList = null
-  var next: TimerTaskEntry = null
-  var prev: TimerTaskEntry = null
+  var next: TimerTaskEntry = null // 后一个节点
+  var prev: TimerTaskEntry = null // 前1个节点
 
   // if this timerTask is already held by an existing timer task entry,
   // setTimerTaskEntry will remove it.

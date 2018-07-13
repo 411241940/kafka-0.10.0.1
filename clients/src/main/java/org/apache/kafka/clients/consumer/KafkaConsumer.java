@@ -3,9 +3,9 @@
  * file distributed with this work for additional information regarding copyright ownership. The ASF licenses this file
  * to You under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the
  * License. You may obtain a copy of the License at
- *
+ * <p>
  * http://www.apache.org/licenses/LICENSE-2.0
- *
+ * <p>
  * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
  * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
  * specific language governing permissions and limitations under the License.
@@ -555,8 +555,8 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                          Deserializer<K> keyDeserializer,
                          Deserializer<V> valueDeserializer) {
         this(new ConsumerConfig(ConsumerConfig.addDeserializerToConfig(configs, keyDeserializer, valueDeserializer)),
-            keyDeserializer,
-            valueDeserializer);
+                keyDeserializer,
+                valueDeserializer);
     }
 
     /**
@@ -585,8 +585,8 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                          Deserializer<K> keyDeserializer,
                          Deserializer<V> valueDeserializer) {
         this(new ConsumerConfig(ConsumerConfig.addDeserializerToConfig(properties, keyDeserializer, valueDeserializer)),
-             keyDeserializer,
-             valueDeserializer);
+                keyDeserializer,
+                valueDeserializer);
     }
 
     @SuppressWarnings("unchecked")
@@ -616,10 +616,14 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
             reporters.add(new JmxReporter(JMX_PREFIX));
             this.metrics = new Metrics(metricConfig, reporters, time);
             this.retryBackoffMs = config.getLong(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG);
+
+            // Metadata
             this.metadata = new Metadata(retryBackoffMs, config.getLong(ConsumerConfig.METADATA_MAX_AGE_CONFIG));
             List<InetSocketAddress> addresses = ClientUtils.parseAndValidateAddresses(config.getList(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG));
             this.metadata.update(Cluster.bootstrap(addresses), 0);
             String metricGrpPrefix = "consumer";
+
+            // NetworkClient
             ChannelBuilder channelBuilder = ClientUtils.createChannelBuilder(config.values());
             NetworkClient netClient = new NetworkClient(
                     new Selector(config.getLong(ConsumerConfig.CONNECTIONS_MAX_IDLE_MS_CONFIG), metrics, time, metricGrpPrefix, channelBuilder),
@@ -630,9 +634,13 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                     config.getInt(ConsumerConfig.SEND_BUFFER_CONFIG),
                     config.getInt(ConsumerConfig.RECEIVE_BUFFER_CONFIG),
                     config.getInt(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG), time);
+
+            // ConsumerNetworkClient
             this.client = new ConsumerNetworkClient(netClient, metadata, time, retryBackoffMs,
                     config.getInt(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG));
             OffsetResetStrategy offsetResetStrategy = OffsetResetStrategy.valueOf(config.getString(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG).toUpperCase(Locale.ROOT));
+
+            // SubscriptionState，订阅的TopicPartition的offset状态维护
             this.subscriptions = new SubscriptionState(offsetResetStrategy);
             List<PartitionAssignor> assignors = config.getConfiguredInstances(
                     ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG,
@@ -643,6 +651,8 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
             List<ConsumerInterceptor<K, V>> interceptorList = (List) (new ConsumerConfig(userProvidedConfigs)).getConfiguredInstances(ConsumerConfig.INTERCEPTOR_CLASSES_CONFIG,
                     ConsumerInterceptor.class);
             this.interceptors = interceptorList.isEmpty() ? null : new ConsumerInterceptors<>(interceptorList);
+
+            // ConsumerCoordinator，负责partitiion的分配，reblance
             this.coordinator = new ConsumerCoordinator(this.client,
                     config.getString(ConsumerConfig.GROUP_ID_CONFIG),
                     config.getInt(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG),
@@ -675,6 +685,8 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                 config.ignore(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG);
                 this.valueDeserializer = valueDeserializer;
             }
+
+            // Fetcher，获取消息
             this.fetcher = new Fetcher<>(this.client,
                     config.getInt(ConsumerConfig.FETCH_MIN_BYTES_CONFIG),
                     config.getInt(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG),
@@ -926,7 +938,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      */
     @Override
     public ConsumerRecords<K, V> poll(long timeout) {
-        acquire();
+        acquire(); // 防止多线程调用
         try {
             if (timeout < 0)
                 throw new IllegalArgumentException("Timeout must not be negative");
@@ -969,25 +981,31 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      * @param timeout The maximum time to block in the underlying poll
      * @return The fetched records (may be empty)
      */
+    // 一次 poll 过程,包括检查新的数据、做一些必要的 commit 以及 offset  重置操作
     private Map<TopicPartition, List<ConsumerRecord<K, V>>> pollOnce(long timeout) {
         // TODO: Sub-requests should take into account the poll timeout (KAFKA-1894)
-        coordinator.ensureCoordinatorReady();
+        coordinator.ensureCoordinatorReady(); // 获取 GroupCoordinator 地址,并且建立连接。如果未找到 coordinator 会一直阻塞
 
         // ensure we have partitions assigned if we expect to
+        // AUTO_TOPICS 或 AUTO_PATTERN 订阅模式
         if (subscriptions.partitionsAutoAssigned())
-            coordinator.ensurePartitionAssignment();
+            // 完成Rebalance操作，每个consumer得到自己分配到的partition
+            coordinator.ensurePartitionAssignment(); // JoinGroup + SyncGroup
 
         // fetch positions if we have partitions we're subscribed to that we
         // don't know the offset for
+        // 获取 partition 的 offset（客户端不知道其offset时）
         if (!subscriptions.hasAllFetchPositions())
             updateFetchPositions(this.subscriptions.missingFetchPositions());
 
         long now = time.milliseconds();
 
         // execute delayed tasks (e.g. autocommits and heartbeats) prior to fetching records
+        // 执行定时任务，Heartbeat 和 AutoCommit
         client.executeDelayedTasks(now);
 
         // init any new fetches (won't resend pending fetches)
+        // 从 completedFetches 缓存（已经拉取到的数据）中获取数据
         Map<TopicPartition, List<ConsumerRecord<K, V>>> records = fetcher.fetchedRecords();
 
         // if data is available already, e.g. from a previous network client poll() call to commit,
@@ -995,9 +1013,9 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
         if (!records.isEmpty())
             return records;
 
-        fetcher.sendFetches();
-        client.poll(timeout, now);
-        return fetcher.fetchedRecords();
+        fetcher.sendFetches(); // 创建并缓存 FetchRequest 请求
+        client.poll(timeout, now); // 发送 FetchRequest
+        return fetcher.fetchedRecords(); // 从 completedFetches 缓存中获取数据
     }
 
     /**
@@ -1309,7 +1327,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     public void pause(Collection<TopicPartition> partitions) {
         acquire();
         try {
-            for (TopicPartition partition: partitions) {
+            for (TopicPartition partition : partitions) {
                 log.debug("Pausing partition {}", partition);
                 subscriptions.pause(partition);
             }
@@ -1328,7 +1346,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     public void resume(Collection<TopicPartition> partitions) {
         acquire();
         try {
-            for (TopicPartition partition: partitions) {
+            for (TopicPartition partition : partitions) {
                 log.debug("Resuming partition {}", partition);
                 subscriptions.resume(partition);
             }
@@ -1403,6 +1421,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      */
     private void updateFetchPositions(Set<TopicPartition> partitions) {
         // refresh commits for all assigned partitions
+        // 刷新 commit offset
         coordinator.refreshCommittedOffsetsIfNeeded();
 
         // then do any offset lookups in case some positions are not known
@@ -1427,7 +1446,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     private void acquire() {
         ensureNotClosed();
         long threadId = Thread.currentThread().getId();
-        if (threadId != currentThread.get() && !currentThread.compareAndSet(NO_CURRENT_THREAD, threadId))
+        if (threadId != currentThread.get() && !currentThread.compareAndSet(NO_CURRENT_THREAD, threadId)) // CAS设置当前线程id为自身
             throw new ConcurrentModificationException("KafkaConsumer is not safe for multi-threaded access");
         refcount.incrementAndGet();
     }

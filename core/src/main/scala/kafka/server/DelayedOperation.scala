@@ -371,6 +371,7 @@ class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: String,
     false) {
 
     override def doWork() {
+      // 不断循环调用 advanceClock ，驱动时间轮不断运转
       advanceClock(200L)
     }
   }

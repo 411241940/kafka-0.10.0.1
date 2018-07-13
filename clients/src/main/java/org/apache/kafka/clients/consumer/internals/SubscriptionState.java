@@ -332,6 +332,7 @@ public class SubscriptionState {
     }
 
     public boolean hasAllFetchPositions() {
+        // 遍历所有的TopicPartition，如果其状态hasValidPosition = false，说明此时客户端不知道其offset，需要向服务器请求
         for (TopicPartitionState state : assignment.values())
             if (!state.hasValidPosition())
                 return false;

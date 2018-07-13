@@ -104,6 +104,16 @@ object AdminUtils extends Logging {
    *                                 assign each replica to a unique rack.
    *
    */
+   /**
+    * 副本分配时,有三个原则:
+    * 1. 将副本平均分布在所有的 Broker 上;
+    * 2. partition 的多个副本应该分配在不同的 Broker 上;
+    * 3. 如果所有的 Broker 有机架信息的话, partition 的副本应该分配到不同的机架上。
+    *
+    * 为实现上面的目标,在没有机架感知的情况下，应该按照下面两个原则分配 replica:
+    * 1. 从 broker.list 随机选择一个 Broker,使用 round-robin 算法分配每个 partition 的第一个副本;
+    * 2. 对于这个 partition 的其他副本,逐渐增加 Broker.id 来选择 replica 的分配。
+    */
   def assignReplicasToBrokers(brokerMetadatas: Seq[BrokerMetadata],
                               nPartitions: Int,
                               replicationFactor: Int,

@@ -99,13 +99,21 @@ import java.util.concurrent.atomic.AtomicInteger
 @nonthreadsafe
 private[timer] class TimingWheel(tickMs: Long, wheelSize: Int, startMs: Long, taskCounter: AtomicInteger, queue: DelayQueue[TimerTaskList]) {
 
+  // 格子范围：每1格的间隔 * 总格数（默认第一层1格是1毫秒，20格，那总共时间范围为20ms)
   private[this] val interval = tickMs * wheelSize
+
+  // buckets 数组存放 TimerTaskList ，每个 bucket(TimerTaskList) 为一个时间格，过期的时间格会复用
+  // TimerTaskList 是一个双向链表，实现了 Delayed ，为 DelayQueue 中的元素
+  // TimerTaskEntry 为链表的每个节点
   private[this] val buckets = Array.tabulate[TimerTaskList](wheelSize) { _ => new TimerTaskList(taskCounter) }
 
+  // 当前时间格的指针，为间隔(tickMs)的整数倍（减去startMs % tickMs）
+  // 将整个时间轮划分为到期部分和未到期部分，currentTime当前指向的时间格也属于到期部分，表示刚好到期
   private[this] var currentTime = startMs - (startMs % tickMs) // rounding down to multiple of tickMs
 
   // overflowWheel can potentially be updated and read by two concurrent threads through add().
   // Therefore, it needs to be volatile due to the issue of Double-Checked Locking pattern with JVM
+  // 超过当前时间轮刻度范围的时间轮
   @volatile private[this] var overflowWheel: TimingWheel = null
 
   private[this] def addOverflowWheel(): Unit = {
@@ -128,38 +136,46 @@ private[timer] class TimingWheel(tickMs: Long, wheelSize: Int, startMs: Long, ta
     if (timerTaskEntry.cancelled) {
       // Cancelled
       false
-    } else if (expiration < currentTime + tickMs) {
+    } else if (expiration < currentTime + tickMs) { // 该Task的过期时间小于当前时间 ＋ 基本的tick单位（1ms)，说明此任务已经过期了，不用再加入timingWheel
       // Already expired
       false
-    } else if (expiration < currentTime + interval) {
+    } else if (expiration < currentTime + interval) { // 过期时间 < 当前时间 ＋ 格子范围，则说明当前的刻度盘包含此过期时间。加入到此刻度盘中
       // Put in its own bucket
+      // buckets 数组下标：task 过期时间除范围取整，再与时间轮长度取余。让同个时间范围的 task 落在同一 bucket 中
       val virtualId = expiration / tickMs
-      val bucket = buckets((virtualId % wheelSize.toLong).toInt)
+      val bucket = buckets((virtualId % wheelSize.toLong).toInt) // 根据过期时间，计算出bucket的位置，添加到该bucket中
       bucket.add(timerTaskEntry)
 
       // Set the bucket expiration time
+      // 设置 bucket 的过期时间，第一次或过期时间有更新返回 true
+      // 因为 bucket 为循环使用，所以每次循环 virtualId 会变大
       if (bucket.setExpiration(virtualId * tickMs)) {
         // The bucket needs to be enqueued because it was an expired bucket
         // We only need to enqueue the bucket when its expiration time has changed, i.e. the wheel has advanced
         // and the previous buckets gets reused; further calls to set the expiration within the same wheel cycle
         // will pass in the same value and hence return false, thus the bucket with the same expiration will not
         // be enqueued multiple times.
-        queue.offer(bucket)
+        queue.offer(bucket) // 该桶只会被加入到 delayedQueue 1次
       }
       true
     } else {
       // Out of the interval. Put it into the parent timer
+      // 超过当前范围的，加入到 parent 时间轮中，递归
       if (overflowWheel == null) addOverflowWheel()
       overflowWheel.add(timerTaskEntry)
     }
   }
 
   // Try to advance the clock
+  // 更新时间轮的 currentTime
+  // timeMs：已经过期的 bucket 过期时间
   def advanceClock(timeMs: Long): Unit = {
     if (timeMs >= currentTime + tickMs) {
+      // 更新currentTime，减去除间隔的余数，取整
       currentTime = timeMs - (timeMs % tickMs)
 
       // Try to advance the clock of the overflow wheel if present
+      // 更新 parent timingWheel 的 currentTime
       if (overflowWheel != null) overflowWheel.advanceClock(currentTime)
     }
   }
